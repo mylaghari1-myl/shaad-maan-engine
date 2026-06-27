@@ -1,5 +1,5 @@
+
 import os
-import json
 import requests
 from fastapi import FastAPI, Request, Response, HTTPException, status
 from google import genai
@@ -21,7 +21,9 @@ else:
 
 
 # --- Webhook Authentication (GET) ---
+# The dual decorators ensure Meta connects instantly whether they add a slash or not
 @app.get("/webhook")
+@app.get("/webhook/")
 async def verify_webhook(request: Request):
     """
     Handles the initial registration handshake from Meta.
@@ -47,7 +49,9 @@ async def verify_webhook(request: Request):
 
 
 # --- Handle Incoming Messages (POST) ---
+# Dual decorators applied here as well for incoming messages
 @app.post("/webhook")
+@app.post("/webhook/")
 async def receive_whatsapp_message(request: Request):
     """
     Listens for incoming messages/audio files from WhatsApp, processes them via Gemini,
@@ -97,9 +101,6 @@ async def receive_whatsapp_message(request: Request):
             audio_id = msg["audio"].get("id")
             print(f"Received voice note ID {audio_id} from {from_number}")
             
-            # Placeholder workflow log for audio engine pipeline
-            # 1. Download file from Meta Graph API using audio_id
-            # 2. Send bytes to Gemini audio parser
             reply_text = "پیغام موصول ہوا۔ ہماری آڈیو پروسیسنگ پائپ لائن فی الحال کام کر رہی ہے۔"
             send_whatsapp_text(from_number, reply_text)
 
@@ -141,9 +142,4 @@ def send_whatsapp_text(recipient_number: str, message_text: str):
     else:
         print(f"Message cleanly dispatched to {recipient_number}")
 
-
-# --- Dynamic Server Port Binding Execution Block ---
-if __name__ == "__main__":
-    # Reads Render's dynamically assigned system port environment...
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port)
+# (Intentionally no if __name__ block here at the bottom so Render controls the port natively)
