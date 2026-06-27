@@ -1,4 +1,3 @@
-
 import os
 import requests
 from fastapi import FastAPI, Request, Response, HTTPException, status
@@ -7,21 +6,21 @@ from google import genai
 # 1. Initialize FastAPI App
 app = FastAPI()
 
-# 2. Grab Environment Variables from Render
+# 2. Grab Environment Variables from Render Dashboard
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "MyDaughterProjectToken2026")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# 3. Initialize Gemini Client (Using the new google-genai SDK format)
+# 3. Initialize Gemini Client (Using the official google-genai SDK format)
 if GEMINI_API_KEY:
     ai_client = genai.Client(api_key=GEMINI_API_KEY)
 else:
     ai_client = None
 
 
-# --- Webhook Authentication (GET) ---
-# The dual decorators ensure Meta connects instantly whether they add a slash or not
+# --- Webhook Authentication Endpoint (GET) ---
+# Dual-route decorators explicitly resolve forced trailing slashes by Meta's validation engine
 @app.get("/webhook")
 @app.get("/webhook/")
 async def verify_webhook(request: Request):
@@ -38,6 +37,7 @@ async def verify_webhook(request: Request):
             print("=== WEBHOOK VERIFIED SUCCESSFULLY ===")
             return Response(content=challenge, media_type="text/plain")
         else:
+            print(f"Verification Failed. Expected: {VERIFY_TOKEN}, Received: {token}")
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN, 
                 detail="Verification token mismatch."
@@ -48,59 +48,9 @@ async def verify_webhook(request: Request):
     )
 
 
-# --- Handle Incoming Messages (POST) ---
-# Dual decorators applied here as well for incoming messages
+# --- Handle Incoming Messages Endpoint (POST) ---
 @app.post("/webhook")
-@app.post("/webhook/")
-async def receive_whatsapp_message(request: Request):
-    """
-    Listens for incoming messages/audio files from WhatsApp, processes them via Gemini,
-    and replies to the user.
-    """
-    try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON body")
-
-    # Guard check for valid WhatsApp payload structures
-    if not (body.get("object") == "whatsapp_business_account" and "entry" in body):
-        return {"status": "ignored", "reason": "Not a valid WhatsApp event structure"}
-
-    try:
-        entry = body["entry"][0]
-        changes = entry.get("changes", [{}])[0]
-        value = changes.get("value", {})
-        messages = value.get("messages", [])
-
-        if not messages:
-            return {"status": "ignored", "reason": "No new messages found in entry payload"}
-
-        msg = messages[0]
-        from_number = msg.get("from")
-        msg_type = msg.get("type")
-
-        # --- TEXT MESSAGE PROCESSING ---
-        if msg_type == "text":
-            user_text = msg["text"].get("body", "")
-            print(f"Received text from {from_number}: {user_text}")
-
-            # Generate response via Gemini
-            if ai_client:
-                response = ai_client.models.generate_content(
-                    model='gemini-2.5-flash',
-                    contents=user_text,
-                )
-                reply_text = response.text
-            else:
-                reply_text = "System configuration error: Gemini API key is missing."
-
-            send_whatsapp_text(from_number, reply_text)
-
-        # --- AUDIO/VOICE MESSAGE PROCESSING ---
-        elif msg_type == "audio":
-            audio_id = msg["audio"].get("id")
-            print(f"Received voice note ID {audio_id} from {from_number}")
-            
+            # Localized default acknowledgement response
             reply_text = "پیغام موصول ہوا۔ ہماری آڈیو پروسیسنگ پائپ لائن فی الحال کام کر رہی ہے۔"
             send_whatsapp_text(from_number, reply_text)
 
@@ -109,7 +59,7 @@ async def receive_whatsapp_message(request: Request):
 
     except Exception as e:
         print(f"Error handling webhook event: {str(e)}")
-        # Return 200 OK to Meta anyway so they don't loop/retry sending the exact same failed event
+        # Return a 200 OK status regardless to prevent Meta from looping retries on failed instances
         return {"status": "error", "message": str(e)}
 
     return {"status": "success"}
@@ -117,7 +67,7 @@ async def receive_whatsapp_message(request: Request):
 
 def send_whatsapp_text(recipient_number: str, message_text: str):
     """
-    Helper function to send outward text messages using Meta Cloud API
+    Dispatches outbound text messages via Meta Cloud API v18.0
     """
     if not WHATSAPP_TOKEN or not PHONE_NUMBER_ID:
         print("Error: Meta credentials missing from Environment variables.")
@@ -142,4 +92,5 @@ def send_whatsapp_text(recipient_number: str, message_text: str):
     else:
         print(f"Message cleanly dispatched to {recipient_number}")
 
-# (Intentionally no if __name__ block here at the bottom so Render controls the port natively)
+# Port-binding execution block is omitted intentionally.
+# Render native configuration uses Uvicorn externally via the dashboard Start Command.
