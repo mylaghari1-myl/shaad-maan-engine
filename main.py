@@ -12,21 +12,16 @@ VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "MyDaughterProjectToken2026")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# 3. Initialize Gemini Client (Using the official google-genai SDK format)
+# 3. Initialize Gemini Client
 if GEMINI_API_KEY:
     ai_client = genai.Client(api_key=GEMINI_API_KEY)
 else:
     ai_client = None
 
-
 # --- Webhook Authentication Endpoint (GET) ---
-# Dual-route decorators explicitly resolve forced trailing slashes by Meta's validation engine
 @app.get("/webhook")
 @app.get("/webhook/")
 async def verify_webhook(request: Request):
-    """
-    Handles the initial registration handshake from Meta.
-    """
     params = request.query_params
     mode = params.get("hub.mode")
     token = params.get("hub.verify_token")
@@ -37,20 +32,53 @@ async def verify_webhook(request: Request):
             print("=== WEBHOOK VERIFIED SUCCESSFULLY ===")
             return Response(content=challenge, media_type="text/plain")
         else:
-            print(f"Verification Failed. Expected: {VERIFY_TOKEN}, Received: {token}")
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN, 
-                detail="Verification token mismatch."
-            )
-    raise HTTPException(
-        status_code=status.HTTP_400_BAD_REQUEST, 
-        detail="Missing webhook parameters."
-    )
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Verification token mismatch.")
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing webhook parameters.")
 
 
 # --- Handle Incoming Messages Endpoint (POST) ---
 @app.post("/webhook")
-            # Localized default acknowledgement response
+@app.post("/webhook/")
+async def receive_whatsapp_message(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    if not (body.get("object") == "whatsapp_business_account" and "entry" in body):
+        return {"status": "ignored", "reason": "Not a valid WhatsApp event structure"}
+
+    try:
+        entry = body["entry"][0]
+        changes = entry.get("changes", [{}])[0]
+        value = changes.get("value", {})
+        messages = value.get("messages", [])
+
+        if not messages:
+            return {"status": "ignored", "reason": "No new messages found in entry payload"}
+
+        msg = messages[0]
+        from_number = msg.get("from")
+        msg_type = msg.get("type")
+
+        if msg_type == "text":
+            user_text = msg["text"].get("body", "")
+            print(f"Received text from {from_number}: {user_text}")
+
+            if ai_client:
+                response = ai_client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=user_text,
+                )
+                reply_text = response.text
+            else:
+                reply_text = "System configuration error: Gemini API key is missing."
+
+            send_whatsapp_text(from_number, reply_text)
+
+        elif msg_type == "audio":
+            audio_id = msg["audio"].get("id")
+            print(f"Received voice note ID {audio_id} from {from_number}")
             reply_text = "پیغام موصول ہوا۔ ہماری آڈیو پروسیسنگ پائپ لائن فی الحال کام کر رہی ہے۔"
             send_whatsapp_text(from_number, reply_text)
 
@@ -59,16 +87,12 @@ async def verify_webhook(request: Request):
 
     except Exception as e:
         print(f"Error handling webhook event: {str(e)}")
-        # Return a 200 OK status regardless to prevent Meta from looping retries on failed instances
         return {"status": "error", "message": str(e)}
 
     return {"status": "success"}
 
 
 def send_whatsapp_text(recipient_number: str, message_text: str):
-    """
-    Dispatches outbound text messages via Meta Cloud API v18.0
-    """
     if not WHATSAPP_TOKEN or not PHONE_NUMBER_ID:
         print("Error: Meta credentials missing from Environment variables.")
         return
@@ -91,6 +115,3 @@ def send_whatsapp_text(recipient_number: str, message_text: str):
         print(f"Meta API Error: {response.status_code} - {response.text}")
     else:
         print(f"Message cleanly dispatched to {recipient_number}")
-
-# Port-binding execution block is omitted intentionally.
-# Render native configuration uses Uvicorn externally via the dashboard Start Command.
