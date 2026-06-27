@@ -144,6 +144,6 @@ def send_whatsapp_text(recipient_number: str, message_text: str):
 
 # --- Dynamic Server Port Binding Execution Block ---
 if __name__ == "__main__":
-    # Reads Render's dynamically assigned system port environment, defaults safely to 8000 locally
+    # Reads Render's dynamically assigned system port environment...
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port)
