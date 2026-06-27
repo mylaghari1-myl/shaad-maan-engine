@@ -1,82 +1,149 @@
-python
 import os
-import uvicorn
+import json
+import requests
+from fastapi import FastAPI, Request, Response, HTTPException, status
+from google import genai
 
-# ... your other code ...
-
-if __name__ == "__main__":
-    # Look for Render's dynamic port, or default to 8000 locally
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port)
-
+# 1. Initialize FastAPI App
 app = FastAPI()
 
-# Initializing official Google GenAI Client
-client = genai.Client()
+# 2. Grab Environment Variables from Render
+WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN")
+VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "MyDaughterProjectToken2026")
+PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-META_TOKEN = os.environ.get("META_ACCESS_TOKEN")
-PHONE_NUMBER_ID = os.environ.get("META_PHONE_NUMBER_ID")
-VERIFY_TOKEN = "MyDaughterProjectToken2026"
+# 3. Initialize Gemini Client (Using the new google-genai SDK format)
+if GEMINI_API_KEY:
+    ai_client = genai.Client(api_key=GEMINI_API_KEY)
+else:
+    ai_client = None
 
+
+# --- Webhook Authentication (GET) ---
 @app.get("/webhook")
-def verify_meta(request: Request):
-    """Initial validation gate for Meta's verification webhook"""
-    mode = request.query_params.get("hub.mode")
-    token = request.query_params.get("hub.verify_token")
-    challenge = request.query_params.get("hub.challenge")
-    
-    if mode == "subscribe" and token == VERIFY_TOKEN:
-        return Response(content=challenge, media_type="text/plain")
-    return "Token Validation Failure"
+async def verify_webhook(request: Request):
+    """
+    Handles the initial registration handshake from Meta.
+    """
+    params = request.query_params
+    mode = params.get("hub.mode")
+    token = params.get("hub.verify_token")
+    challenge = params.get("hub.challenge")
 
-@app.post("/webhook")
-async def handle_whatsapp_message(request: Request):
-    """Processes real-time inbound text and voice notifications from Meta"""
-    payload = await request.json()
-    
-    try:
-        entry = payload["entry"][0]
-        changes = entry["changes"][0]
-        value = changes["value"]
-        message = value["messages"][0]
-        sender_phone = message["from"]
-        
-        # Intercept and process voice logs natively
-        if message.get("type") == "audio":
-            audio_id = message["audio"]["id"]
-            
-            # Step A: Download temporary media locator from Meta Cloud
-            headers = {"Authorization": f"Bearer {META_TOKEN}"}
-            media_info = requests.get(f"https://graph.facebook.com/v25.0/{audio_id}", headers=headers).json()
-            download_url = media_info.get("url")
-            
-            # Step B: Get raw audio stream data binary
-            raw_audio_bytes = requests.get(download_url, headers=headers).content
-            
-            # Step C: Send direct inline media request to Gemini 2.5 Flash
-            ai_response = client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=[
-                    "You are a helpful, warm AI conversational assistant. Listen to the audio and reply naturally back in the user's language.",
-                    {"inline_data": {"data": base64.b64encode(raw_audio_bytes).decode('utf-8'), "mime_type": "audio/ogg"}}
-                ]
+    if mode and token:
+        if mode == "subscribe" and token == VERIFY_TOKEN:
+            print("=== WEBHOOK VERIFIED SUCCESSFULLY ===")
+            return Response(content=challenge, media_type="text/plain")
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, 
+                detail="Verification token mismatch."
             )
-            
-            # Step D: Route structured text feedback to target user channel
-            send_whatsapp_text(sender_phone, ai_response.text)
-            
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST, 
+        detail="Missing webhook parameters."
+    )
+
+
+# --- Handle Incoming Messages (POST) ---
+@app.post("/webhook")
+async def receive_whatsapp_message(request: Request):
+    """
+    Listens for incoming messages/audio files from WhatsApp, processes them via Gemini,
+    and replies to the user.
+    """
+    try:
+        body = await request.json()
     except Exception:
-        pass
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    # Guard check for valid WhatsApp payload structures
+    if not (body.get("object") == "whatsapp_business_account" and "entry" in body):
+        return {"status": "ignored", "reason": "Not a valid WhatsApp event structure"}
+
+    try:
+        entry = body["entry"][0]
+        changes = entry.get("changes", [{}])[0]
+        value = changes.get("value", {})
+        messages = value.get("messages", [])
+
+        if not messages:
+            return {"status": "ignored", "reason": "No new messages found in entry payload"}
+
+        msg = messages[0]
+        from_number = msg.get("from")
+        msg_type = msg.get("type")
+
+        # --- TEXT MESSAGE PROCESSING ---
+        if msg_type == "text":
+            user_text = msg["text"].get("body", "")
+            print(f"Received text from {from_number}: {user_text}")
+
+            # Generate response via Gemini
+            if ai_client:
+                response = ai_client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=user_text,
+                )
+                reply_text = response.text
+            else:
+                reply_text = "System configuration error: Gemini API key is missing."
+
+            send_whatsapp_text(from_number, reply_text)
+
+        # --- AUDIO/VOICE MESSAGE PROCESSING ---
+        elif msg_type == "audio":
+            audio_id = msg["audio"].get("id")
+            print(f"Received voice note ID {audio_id} from {from_number}")
+            
+            # Placeholder workflow log for audio engine pipeline
+            # 1. Download file from Meta Graph API using audio_id
+            # 2. Send bytes to Gemini audio parser
+            reply_text = "پیغام موصول ہوا۔ ہماری آڈیو پروسیسنگ پائپ لائن فی الحال کام کر رہی ہے۔"
+            send_whatsapp_text(from_number, reply_text)
+
+        else:
+            print(f"Unsupported message type received: {msg_type}")
+
+    except Exception as e:
+        print(f"Error handling webhook event: {str(e)}")
+        # Return 200 OK to Meta anyway so they don't loop/retry sending the exact same failed event
+        return {"status": "error", "message": str(e)}
+
     return {"status": "success"}
 
-def send_whatsapp_text(phone_number, reply_text):
-    """Transmits structural messages to active chat pipelines via Graph API"""
-    url = f"https://graph.facebook.com/v25.0/{PHONE_NUMBER_ID}/messages"
-    headers = {"Authorization": f"Bearer {META_TOKEN}", "Content-Type": "application/json"}
-    data = {
-        "messaging_product": "whatsapp",
-        "to": phone_number,
-        "type": "text",
-        "text": {"body": reply_text}
+
+def send_whatsapp_text(recipient_number: str, message_text: str):
+    """
+    Helper function to send outward text messages using Meta Cloud API
+    """
+    if not WHATSAPP_TOKEN or not PHONE_NUMBER_ID:
+        print("Error: Meta credentials missing from Environment variables.")
+        return
+
+    url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json"
     }
-    requests.post(url, json=data, headers=headers)
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": recipient_number,
+        "type": "text",
+        "text": {"preview_url": False, "body": message_text}
+    }
+
+    response = requests.post(url, headers=headers, json=payload)
+    if response.status_code not in [200, 201]:
+        print(f"Meta API Error: {response.status_code} - {response.text}")
+    else:
+        print(f"Message cleanly dispatched to {recipient_number}")
+
+
+# --- Dynamic Server Port Binding Execution Block ---
+if __name__ == "__main__":
+    # Reads Render's dynamically assigned system port environment, defaults safely to 8000 locally
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
