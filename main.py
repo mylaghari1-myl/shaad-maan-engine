@@ -1,9 +1,13 @@
 python
 import os
-import base64
-import requests
-from fastapi import FastAPI, Request, Response
-from google import genai
+import uvicorn
+
+# ... your other code ...
+
+if __name__ == "__main__":
+    # Look for Render's dynamic port, or default to 8000 locally
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
 
 app = FastAPI()
 
